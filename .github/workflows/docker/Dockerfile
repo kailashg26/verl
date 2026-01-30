@@ -1,0 +1,49 @@
+# Base image
+FROM docker.io/rocm/megatron-lm:v25.10
+
+# Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
+ARG PRIMUS_TURBO_COMMIT
+
+# Install basic dependencies
+RUN apt-get update
+
+# Clone and install the Primus-Turbo
+# WORKDIR /opt
+# RUN mkdir -p /opt && cd /opt && \
+#     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
+#     cd Primus-Turbo && \
+#     git checkout ${PRIMUS_TURBO_COMMIT} && \
+#     git submodule update --init --recursive && \
+#     pip3 install -r requirements.txt && \
+#     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+
+RUN apt-get install --reinstall binutils -y && apt-get install numactl -y && \
+    pip install ray && \
+    pip install "numpy<2.0" && \
+    pip install --upgrade "openai>=1.99.4" && \
+    pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@9577b1280eaadd60b9d7b0ce6df09ac80e87e323 --no-deps
+
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/vllm-project/vllm.git && \
+    cd vllm && \
+    git checkout 803e3f3f688677701a616d692125e181116d6b69 && \
+    python3 -m pip install -r requirements/rocm.txt && \
+    python3 setup.py clean --all && \
+    ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \
+    VLLM_TARGET_DEVICE=rocm ROCM_PATH=/opt/rocm/ VLLM_GPU_LANG=HIP MAX_JOBS=$(nproc) python3 setup.py bdist_wheel --dist-dir=dist && \
+    pip install dist/*whl
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/volcengine/verl.git && \
+    cd verl && \
+    git checkout 74f322453634c07bd9cb2d67533d68e42eb37710 && \
+    pip install -e .
+
+# Set the default working directory
+WORKDIR /opt
+
+# check the installed Primus-Turbo package
+# RUN python3 -m pip show primus-turbo || true
