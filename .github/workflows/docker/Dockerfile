@@ -5,7 +5,7 @@ FROM docker.io/rocm/megatron-lm:v25.10
 ARG PRIMUS_TURBO_COMMIT
 
 # Install basic dependencies
-RUN apt-get update
+RUN apt-get update && apt-get install --reinstall binutils -y && apt-get install numactl -y
 
 # Clone and install the Primus-Turbo
 # WORKDIR /opt
@@ -17,12 +17,23 @@ RUN apt-get update
 #     pip3 install -r requirements.txt && \
 #     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 
-RUN apt-get install --reinstall binutils -y && apt-get install numactl -y && \
-    pip install ray && \
+RUN pip install ray && \
     pip install "numpy<2.0" && \
-    pip install --upgrade "openai>=1.99.4" && \
-    pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@9577b1280eaadd60b9d7b0ce6df09ac80e87e323 --no-deps
+    pip install --upgrade "openai>=1.99.4"
 
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git && \
+    cd Megatron-Bridge && \
+    git checkout 9577b1280eaadd60b9d7b0ce6df09ac80e87e323 && \
+    pip install -e . --no-deps
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/NVIDIA/Megatron-LM.git && \
+    cd Megatron-LM && \
+    git checkout 847781764fe468c90caec16309deded245c1022c && \
+    pip install -e . --no-deps
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \

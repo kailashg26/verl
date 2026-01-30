@@ -47,7 +47,8 @@ jobs:
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+          docker build --network=host \
+               -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                -t tasimage/primus:verl-${{env.IMAGE_TAG}} \
                .
           end_time=$(date +%s)
