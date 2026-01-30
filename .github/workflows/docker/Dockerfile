@@ -1,8 +1,12 @@
 # Base image
+# FROM docker.io/rocm/megatron-lm:v25.9_gfx942
 FROM docker.io/rocm/megatron-lm:v25.10
 
 # Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
-ARG PRIMUS_TURBO_COMMIT
+# ARG PRIMUS_TURBO_COMMIT
+ENV AITER_ROCM_ARCH=gfx942
+ENV HIP_ARCHITECTURES=gfx942
+ENV PYTORCH_ROCM_ARCH=gfx942
 
 # Install basic dependencies
 RUN apt-get update && apt-get install --reinstall binutils -y && apt-get install numactl -y
@@ -37,6 +41,15 @@ RUN mkdir -p /opt && cd /opt && \
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
+    rm -rf aiter && pip uninstall -y aiter && \
+    git clone https://github.com/ROCm/aiter.git && \
+    cd aiter && \
+    git checkout v0.1.7.post2 && \
+    git submodule update --init --recursive && \
+    python3 setup.py develop
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/vllm-project/vllm.git && \
     cd vllm && \
     git checkout 803e3f3f688677701a616d692125e181116d6b69 && \
@@ -52,6 +65,8 @@ RUN mkdir -p /opt && cd /opt && \
     cd verl && \
     git checkout 74f322453634c07bd9cb2d67533d68e42eb37710 && \
     pip install -e .
+
+RUN pip install git+https://github.com/ISEEKYAN/mbridge.git --no-deps
 
 # Set the default working directory
 WORKDIR /opt
