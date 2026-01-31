@@ -41,20 +41,19 @@ RUN mkdir -p /opt && cd /opt && \
     git submodule update --init --recursive && \
     python3 setup.py develop
 
+WORKDIR /opt
 ENV NVTE_FRAMEWORK=pytorch
 ENV NVTE_ROCM_ARCH=gfx942
 ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_USE_ROCM=1
 ENV CMAKE_PREFIX_PATH="/opt/rocm:/opt/rocm/hip:/usr/local:/usr"
-
-WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
     rm -rf TransformerEngine && pip uninstall -y transformer_engine && \
     git clone https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
     git checkout 90c04bcdc3c109505b318f40a39680263af55edf && \
     git submodule update --init --recursive && \
-    pip install . -vvv
+    pip install --no-build-isolation .
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
