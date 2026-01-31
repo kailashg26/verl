@@ -34,13 +34,6 @@ RUN mkdir -p /opt && cd /opt && \
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
-    git clone https://github.com/NVIDIA/Megatron-LM.git && \
-    cd Megatron-LM && \
-    git checkout 847781764fe468c90caec16309deded245c1022c && \
-    pip install -e . --no-deps
-
-WORKDIR /opt
-RUN mkdir -p /opt && cd /opt && \
     rm -rf aiter && pip uninstall -y aiter && \
     git clone https://github.com/ROCm/aiter.git && \
     cd aiter && \
@@ -48,11 +41,34 @@ RUN mkdir -p /opt && cd /opt && \
     git submodule update --init --recursive && \
     python3 setup.py develop
 
+ENV NVTE_FRAMEWORK=pytorch
+ENV NVTE_ROCM_ARCH=gfx942
+ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_USE_ROCM=1
+ENV CMAKE_PREFIX_PATH="/opt/rocm:/opt/rocm/hip:/usr/local:/usr"
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    rm -rf TransformerEngine && pip uninstall -y transformer_engine && \
+    git clone https://github.com/ROCm/TransformerEngine.git \
+    cd TransformerEngine && \
+    git checkout 90c04bcdc3c109505b318f40a39680263af55edf && \
+    git submodule update --init --recursive && \
+    MAX_JOBS=$(nproc) pip install . -vvv
+
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/NVIDIA/Megatron-LM.git && \
+    cd Megatron-LM && \
+    git checkout 847781764fe468c90caec16309deded245c1022c && \
+    pip install -e . --no-deps
+
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/vllm-project/vllm.git && \
     cd vllm && \
     git checkout 803e3f3f688677701a616d692125e181116d6b69 && \
+    git apply patch_vllm.diff && \
     python3 -m pip install -r requirements/rocm.txt && \
     python3 setup.py clean --all && \
     ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \

@@ -50,7 +50,7 @@ jobs:
           docker build --network=host \
                -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                -t tasimage/primus:verl-${{env.IMAGE_TAG}} \
-               .
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build verl docker] Total elapsed time: ${elapsed} seconds"
@@ -60,7 +60,7 @@ jobs:
           docker build --network=host \
                -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.torch2.9 \
                -t tasimage/primus:verl-torch2.9-${{env.IMAGE_TAG}} \
-               .
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build verl docker] Total elapsed time: ${elapsed} seconds"
