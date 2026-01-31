@@ -54,7 +54,7 @@ RUN mkdir -p /opt && cd /opt && \
     cd TransformerEngine && \
     git checkout 90c04bcdc3c109505b318f40a39680263af55edf && \
     git submodule update --init --recursive && \
-    MAX_JOBS=$(nproc) pip install . -vvv
+    pip install . -vvv
 
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
