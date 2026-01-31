@@ -54,6 +54,16 @@ jobs:
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build verl docker] Total elapsed time: ${elapsed} seconds"
+          
+          echo "> Build ROCM7 Torch2.9 Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          start_time=$(date +%s)
+          docker build --network=host \
+               -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.torch2.9 \
+               -t tasimage/primus:verl-torch2.9-${{env.IMAGE_TAG}} \
+               .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build verl docker] Total elapsed time: ${elapsed} seconds"
 
           echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
@@ -61,6 +71,7 @@ jobs:
           echo "> Docker push to Docker Hub"
           start_time=$(date +%s)
           docker push docker.io/tasimage/primus:verl-${{env.IMAGE_TAG}}
+          docker push docker.io/tasimage/primus:verl-torch2.9-${{env.IMAGE_TAG}}
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
