@@ -63,7 +63,8 @@ RUN mkdir -p /opt && cd /opt && \
     pip install -e . --no-deps
 
 WORKDIR /opt
-RUN mkdir -p /opt && cp patch_vllm.diff /opt/ && cd /opt && \
+COPY ./patch_vllm.diff /opt/
+RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/vllm-project/vllm.git && \
     cd vllm && mv ../patch_vllm.diff . && \
     git checkout 803e3f3f688677701a616d692125e181116d6b69 && \
