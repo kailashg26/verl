@@ -50,7 +50,7 @@ ENV CMAKE_PREFIX_PATH="/opt/rocm:/opt/rocm/hip:/usr/local:/usr"
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
     rm -rf TransformerEngine && pip uninstall -y transformer_engine && \
-    git clone https://github.com/ROCm/TransformerEngine.git \
+    git clone https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
     git checkout 90c04bcdc3c109505b318f40a39680263af55edf && \
     git submodule update --init --recursive && \
