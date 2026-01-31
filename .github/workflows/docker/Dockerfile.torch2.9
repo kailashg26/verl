@@ -63,9 +63,9 @@ RUN mkdir -p /opt && cd /opt && \
     pip install -e . --no-deps
 
 WORKDIR /opt
-RUN mkdir -p /opt && cd /opt && \
+RUN mkdir -p /opt && cp patch_vllm.diff /opt/ && cd /opt && \
     git clone https://github.com/vllm-project/vllm.git && \
-    cd vllm && \
+    cd vllm && mv ../patch_vllm.diff . && \
     git checkout 803e3f3f688677701a616d692125e181116d6b69 && \
     git apply patch_vllm.diff && \
     python3 -m pip install -r requirements/rocm.txt && \
