@@ -95,8 +95,8 @@ RUN mkdir -p /opt && cd /opt && \
     python setup.py install
 
 # required by megatron-bridge
-RUN pip uninstall triton && \
- pip install triton==3.4.0 \
+RUN pip uninstall triton -y && \
+  pip install triton==3.4.0 \
   onnx==1.20.0rc1 \
   -U nvidia-modelopt \
   -U nvidia_resiliency_ext \
