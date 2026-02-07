@@ -221,6 +221,8 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_n
     data.max_prompt_length=1024 \
     data.max_response_length=32768 \
     actor_rollout_ref.model.path=$MODEL_PATH \
+    actor_rollout_ref.model.use_fused_kernels=True \
+    actor_rollout_ref.nccl_timeout=3600 \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
