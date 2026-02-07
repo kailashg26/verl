@@ -1,15 +1,15 @@
 #!/bin/bash
 
 #SBATCH --job-name=verl-ray-on-slurm
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=2
 #SBATCH --mem=200G
 #SBATCH --time=30-00:00:00
 #SBATCH --gpus-per-node=8
-#SBATCH --cpus-per-task=28
+#SBATCH --cpus-per-task=96
 #SBATCH --output=./logs/slurm-%j.out
 #SBATCH --error=./logs/slurm-%j.err
-##SBATCH --nodelist=useocpm2m-097-[008,032,041,046]
+##SBATCH --nodelist=useocpm2m-097-[008,038,039,041]
 ##SBATCH --nodelist=useocpm2m-097-[008,032]
 
 
@@ -22,8 +22,8 @@
 ##########################################################################
 ###The following setting should be set in different project and cluster###
 ##########################################################################
-CONTAINER_NAME="multinode_verl_training_${SLURM_JOB_ID}"
-verl_workdir="/root/verl"
+CONTAINER_NAME="multinode_verl_training"
+verl_workdir="${HOME}/verl"
 
 ### Cluster Network Setting
 export NCCL_DEBUG=TRACE
@@ -46,8 +46,10 @@ export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # export ROCR_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
 export CUDA_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
 
-export HF_HOME="/root/huggingface"
+export HF_HOME="${HOME}/.cache/huggingface"
 export HF_TOKEN="your_huggingface_token"
+
+export TIKTOKEN_RS_CACHE_DIR="${HOME}/tiktoken"
 
 # Build and launch the Docker container
 srun bash -c "
@@ -57,9 +59,10 @@ srun bash -c "
     # Need to pull the docker first
     docker pull docker.io/tasimage/primus:verl-torch2.9-pr-7
 
-    # Kill and remove any existing containers (clean slate before launch)
-    docker ps -q | xargs -r docker kill
-    docker ps -aq | xargs -r docker rm
+    # Kill and remove any existing containers (clean slate before launch).
+    # Ignore errors so we don't abort the setup if nothing is running or a kill fails.
+    docker ps -q | xargs -r docker kill || true
+    docker ps -aq | xargs -r docker rm || true
 
     # Checking network devices
     ibdev2netdev
@@ -87,6 +90,7 @@ srun bash -c "
     -e HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM} \
     -e HF_HOME=${HF_HOME} \
     -e HF_TOKEN=${HF_TOKEN} \
+    -e TIKTOKEN_RS_CACHE_DIR=${TIKTOKEN_RS_CACHE_DIR} \
     --network host \
     --device /dev/dri \
     --device /dev/kfd \
@@ -95,7 +99,7 @@ srun bash -c "
     --cap-add SYS_PTRACE \
     --security-opt seccomp=unconfined \
     --privileged \
-    -v \${HOME}:/root \
+    -v \${HOME}:\${HOME} \
     -v \${HOME}/.ssh:/root/.ssh \
     --shm-size 128G \
     --name \"${CONTAINER_NAME}\" \
@@ -104,12 +108,6 @@ srun bash -c "
 
     echo \"Container setup completed\"
 "
-    # (Optional): If you do not want to root mode and require assign yuorself as the user
-    # Please add `-e HOST_UID=$(id -u)` and `-e HOST_GID=$(id -g)` into the above docker launch script.
-
-
-
-
 
 ### Ray launch the nodes before training
 
@@ -163,11 +161,9 @@ for ((i = 1; i <= worker_num; i++)); do
     echo "Starting WORKER $i at $node_i"
     srun --nodes=1 --ntasks=1 -w "$node_i" \
         docker exec "${CONTAINER_NAME}" \
-            ray start --address "$ip_head" --num-cpus "${SLURM_CPUS_PER_TASK}" --num-gpus "${SLURM_GPUS_PER_NODE}"
-    sleep 10
+            ray start --address "$ip_head" --num-cpus "${SLURM_CPUS_PER_TASK}" --num-gpus "${SLURM_GPUS_PER_NODE}" --block &
 done
-
-
+sleep 10
 
 
 # Ray initlization test (See whether any error in the above execution)
@@ -210,23 +206,26 @@ MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
 
 echo "Start to train..."
 
+# docker exec "${CONTAINER_NAME}" \
+#     python3 -c "import transformers; transformers.pipeline('text-generation', model='$MODEL_PATH')"
+
 PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_node" \
-    docker exec "${CONTAINER_NAME}" \
+    docker exec "${CONTAINER_NAME}" sh -c " \
+    ls -la ${TIKTOKEN_RS_CACHE_DIR} && \
     python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_trainer.yaml' \
     algorithm.adv_estimator=grpo \
     data.train_files="${train_files}" \
     data.val_files="${val_files}" \
     data.train_batch_size=64 \
-    data.max_prompt_length=256 \
-    data.max_response_length=1024 \
-    data.val_max_samples=64 \
-    data.train_max_samples=256 \
+    data.max_prompt_length=1024 \
+    data.max_response_length=32768 \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=fp16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
@@ -237,10 +236,12 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_n
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.dtype=float16 \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.strategy=fsdp2 \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=fp16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
@@ -251,4 +252,4 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_n
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=1 \
-    2>&1 | tee log.txt
+    2>&1 | tee log.txt "
