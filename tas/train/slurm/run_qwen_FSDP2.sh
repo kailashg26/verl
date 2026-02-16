@@ -9,21 +9,13 @@
 #SBATCH --cpus-per-task=96
 #SBATCH --output=./logs/slurm-%j.out
 #SBATCH --error=./logs/slurm-%j.err
-##SBATCH --nodelist=useocpm2m-097-[008,038,039,041]
-##SBATCH --nodelist=useocpm2m-097-[008,032]
-
-
-# load necessary modules
-### Run this setup
-# [Cluster]: Use docker
-# docker pull docker.io/rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
-
+#SBATCH --nodelist=useocpm2m-097-[008,032,014,015,024,026,046,049,050,028,030,038,039]
 
 ##########################################################################
 ###The following setting should be set in different project and cluster###
 ##########################################################################
-CONTAINER_NAME="multinode_verl_training"
-verl_workdir="${HOME}/verl"
+CONTAINER_NAME="multinode_verl_training_${SLURM_JOB_ID}"
+verl_workdir="${HOME}/verl_yuankai"
 
 ### Cluster Network Setting
 export NCCL_DEBUG=TRACE
@@ -39,6 +31,7 @@ export NCCL_PROTO=Simple
 export RCCL_MSCCL_ENABLE=0
 export TOKENIZERS_PARALLELISM=false
 export HSA_NO_SCRATCH_RECLAIM=1
+export VLLM_ROCM_USE_AITER=0
 ##########################################################################
 
 ### For rocm and training script
@@ -62,6 +55,7 @@ srun bash -c "
     # Kill and remove any existing containers (clean slate before launch).
     # Ignore errors so we don't abort the setup if nothing is running or a kill fails.
     docker ps -q | xargs -r docker kill || true
+    sleep 10
     docker ps -aq | xargs -r docker rm || true
 
     # Checking network devices
@@ -88,6 +82,7 @@ srun bash -c "
     -e RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE} \
     -e TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM} \
     -e HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM} \
+    -e VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER} \
     -e HF_HOME=${HF_HOME} \
     -e HF_TOKEN=${HF_TOKEN} \
     -e TIKTOKEN_RS_CACHE_DIR=${TIKTOKEN_RS_CACHE_DIR} \
@@ -109,6 +104,7 @@ srun bash -c "
     echo \"Container setup completed\"
 "
 
+sleep 10
 ### Ray launch the nodes before training
 
 # Getting the node names
@@ -161,7 +157,7 @@ for ((i = 1; i <= worker_num; i++)); do
     echo "Starting WORKER $i at $node_i"
     srun --nodes=1 --ntasks=1 -w "$node_i" \
         docker exec "${CONTAINER_NAME}" \
-            ray start --address "$ip_head" --num-cpus "${SLURM_CPUS_PER_TASK}" --num-gpus "${SLURM_GPUS_PER_NODE}" --block &
+            ray start --address "$ip_head" --num-cpus "${SLURM_CPUS_PER_TASK}" --num-gpus "${SLURM_GPUS_PER_NODE}"
 done
 sleep 10
 
@@ -186,8 +182,6 @@ echo "=== Ray test completed ==="
 ######
 
 
-
-
 # Run data preprocessing
 
 # echo "Starting data preprocessing..."
@@ -201,17 +195,31 @@ echo "=== Ray test completed ==="
 train_files="${verl_workdir}/tas/train/data/gsm8k/train.parquet"
 val_files="${verl_workdir}/tas/train/data/gsm8k/test.parquet"
 
-MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
-# MODEL_PATH="Qwen/Qwen3-30B-A3B-Instruct-2507"
+verl_install_dir="${HOME}/verl"
+transformers_install_dir="${HOME}/transformers"
+
+# MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_PATH="Qwen/Qwen3-30B-A3B-Instruct-2507"
+SP_SIZE=1
+DYNAMIC_BSZ=True
 
 echo "Start to train..."
 
-# docker exec "${CONTAINER_NAME}" \
-#     python3 -c "import transformers; transformers.pipeline('text-generation', model='$MODEL_PATH')"
+# PATCH transformers and verl if needed
+# srun \
+#     docker exec "${CONTAINER_NAME}" sh -c " \
+#     ls -la ${TIKTOKEN_RS_CACHE_DIR} && \
+#     cd ${verl_install_dir} && \
+#     pip uninstall verl -y && \
+#     pip install -e . --no-deps && \
+#     cd ${transformers_install_dir} && \
+#     pip uninstall transformers -y && \
+#     pip install -e . --no-deps && \
+#     pip list | grep transformers && \
+#     pip list | grep verl "
 
 PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_node" \
     docker exec "${CONTAINER_NAME}" sh -c " \
-    ls -la ${TIKTOKEN_RS_CACHE_DIR} && \
     python3 -m verl.trainer.main_ppo --config-path=config \
     --config-name='ppo_trainer.yaml' \
     algorithm.adv_estimator=grpo \
@@ -221,30 +229,41 @@ PYTHONUNBUFFERED=1 srun --overlap --nodes=${SLURM_NNODES} --ntasks=1 -w "$head_n
     data.max_prompt_length=1024 \
     data.max_response_length=32768 \
     actor_rollout_ref.model.path=$MODEL_PATH \
-    actor_rollout_ref.model.use_fused_kernels=True \
+    actor_rollout_ref.model.use_fused_kernels=False \
+    actor_rollout_ref.model.enable_activation_offload=False \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.nccl_timeout=3600 \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.use_dynamic_bsz=${DYNAMIC_BSZ} \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.actor.strategy=fsdp2 \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=fp16 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.model.enable_gradient_checkpointing=False \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=33792 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${DYNAMIC_BSZ} \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-    actor_rollout_ref.rollout.dtype=float16 \
+    actor_rollout_ref.rollout.dtype=bfloat16 \
+    actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.rollout.enable_chunked_prefill=False \
+    actor_rollout_ref.rollout.max_model_len=33792 \
     actor_rollout_ref.rollout.n=16 \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${DYNAMIC_BSZ} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size=${SP_SIZE} \
     actor_rollout_ref.ref.strategy=fsdp2 \
-    actor_rollout_ref.ref.fsdp_config.model_dtype=fp16 \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=console \
