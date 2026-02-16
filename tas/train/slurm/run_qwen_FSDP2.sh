@@ -15,7 +15,7 @@
 ###The following setting should be set in different project and cluster###
 ##########################################################################
 CONTAINER_NAME="multinode_verl_training_${SLURM_JOB_ID}"
-verl_workdir="${HOME}/verl_yuankai"
+verl_workdir="${HOME}/verl"
 
 ### Cluster Network Setting
 export NCCL_DEBUG=TRACE
