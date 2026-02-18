@@ -1,0 +1,183 @@
+diff --git a/verl/experimental/fully_async_policy/base_detach_sync.py b/verl/experimental/fully_async_policy/base_detach_sync.py
+index b777bfa4..5270a8fb 100644
+--- a/verl/experimental/fully_async_policy/base_detach_sync.py
++++ b/verl/experimental/fully_async_policy/base_detach_sync.py
+@@ -24,6 +24,7 @@ from ray.util.collective import collective
+ 
+ from verl.single_controller.base.decorator import Dispatch, register
+ from verl.utils.device import get_torch_device
++from verl.utils.distributed import stateless_init_process_group
+ 
+ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+@@ -119,6 +120,25 @@ class BaseDetachNcclSync:
+         if hasattr(self, "_bg_thread") and self._bg_thread.is_alive():
+             self._bg_thread.join(timeout=1.0)
+ 
++    @staticmethod
++    def _use_torch_distributed_broadcast():
++        """Check if we should use torch.distributed broadcast instead of ray.util.collective.
++        Needed for ROCm/HIP (RCCL) environments where ray.util.collective is unavailable."""
++        if getattr(torch.version, "hip", None) is not None:
++            return True
++        return False
++
++    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
++    def create_weight_sync_group(self, master_address, master_port, rank_offset, world_size):
++        rank = torch.distributed.get_rank() + rank_offset
++        self._weight_sync_group = stateless_init_process_group(
++            master_address,
++            master_port,
++            rank,
++            world_size,
++            get_torch_device().current_device(),
++        )
++
+     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+     def init_checkpoint_engine(self, rank_offset: int, actor_num: int, rollout_num: int):
+         from .checkpoint_engine import CheckpointEngine
+@@ -158,6 +178,7 @@ class BaseDetachNcclSync:
+         actual_bucket_sizes = []
+         current_batch = []
+         current_batch_size = 0
++        use_torch_dist = self._use_torch_distributed_broadcast()
+ 
+         def flush_batch():
+             if current_batch:
+@@ -175,7 +196,10 @@ class BaseDetachNcclSync:
+                     origin_data = origin_data.full_tensor()
+                 if torch.distributed.get_rank() == 0:
+                     tensor.copy_(origin_data)
+-            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
++            if use_torch_dist:
++                self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
++            else:
++                collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+ 
+             tensor_size = tensor.numel() * tensor.element_size()
+             current_batch.append((key, tensor))
+@@ -196,6 +220,7 @@ class BaseDetachNcclSync:
+             self._run_async_safely(inference_model.resume_memory_occupation(tags=["kv_cache"]))
+ 
+     def _sync_vllm_weights(self, inference_model, params, sync_group_name):
++        use_torch_dist = self._use_torch_distributed_broadcast()
+         for key, shape, dtype in self._weights_info:
+             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+             if self._is_actor:
+@@ -205,7 +230,10 @@ class BaseDetachNcclSync:
+                     origin_data = origin_data.full_tensor()
+                 if torch.distributed.get_rank() == 0:
+                     tensor.copy_(origin_data)
+-            collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
++            if use_torch_dist:
++                self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
++            else:
++                collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+             if self._is_rollout:
+                 inference_model.load_weights([(key, tensor)])
+ 
+diff --git a/verl/experimental/fully_async_policy/fsdp_workers.py b/verl/experimental/fully_async_policy/fsdp_workers.py
+index 5f7b4652..6a0687c6 100644
+--- a/verl/experimental/fully_async_policy/fsdp_workers.py
++++ b/verl/experimental/fully_async_policy/fsdp_workers.py
+@@ -97,6 +97,7 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
+         if rollout_name == "sglang" and self._is_rollout:
+             self._sync_sglang_weights(inference_model, params, sync_group_name)
+         else:
++            use_torch_dist = self._use_torch_distributed_broadcast()
+             for key, shape, dtype in self._weights_info:
+                 tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                 if self._is_actor:
+@@ -106,9 +107,11 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
+                         origin_data = origin_data.full_tensor()
+                     if torch.distributed.get_rank() == 0:
+                         tensor.copy_(origin_data)
+-                from ray.util.collective import collective
+-
+-                collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
++                if use_torch_dist:
++                    self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
++                else:
++                    from ray.util.collective import collective
++                    collective.broadcast(tensor, src_rank=0, group_name=sync_group_name)
+                 if self._is_rollout and (not self._is_actor):
+                     inference_model.load_weights([(key, tensor)])
+ 
+@@ -143,8 +146,6 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
+             load_fsdp_model_to_gpu(self.actor_module_fsdp)
+         load_duration = time.time() - load_start_time
+ 
+-        from ray.util.collective import collective
+-
+         # Cache actor weights to CPU and measure the time taken
+         cache_start_time = time.time()
+         self.cache_actor_weights_to_cpu()
+@@ -157,7 +158,11 @@ class DetachNcclSync(BaseDetachNcclSync, AsyncActorRolloutRefWorker):
+         register_duration = register_end_time - cache_end_time
+         self.cpu_named_params = {}
+ 
+-        collective.barrier(group_name=sync_group_name)
++        if self._use_torch_distributed_broadcast():
++            self._weight_sync_group.barrier()
++        else:
++            from ray.util.collective import collective
++            collective.barrier(group_name=sync_group_name)
+         update_start_time = time.time()
+ 
+         inference_model = None
+diff --git a/verl/experimental/fully_async_policy/param_sync.py b/verl/experimental/fully_async_policy/param_sync.py
+index 475c1914..98057ef0 100644
+--- a/verl/experimental/fully_async_policy/param_sync.py
++++ b/verl/experimental/fully_async_policy/param_sync.py
+@@ -68,16 +68,44 @@ class ParameterSynchronizer:
+         self.weights_info = self.actor_wg.get_actor_weights_info()[0]
+         self.rollout_wg.set_actor_weights_info(self.weights_info)
+ 
++    def _use_torch_distributed_sync(self):
++        """Check if we should use torch.distributed instead of ray.util.collective.
++        This is needed for NPU (HCCL) and ROCm/HIP (RCCL) environments where
++        ray.util.collective NCCL backend is not available."""
++        import torch
++        if getattr(torch.version, "hip", None) is not None:
++            return True
++        return False
++
+     def _init_sync_group(self):
+         print("[ParameterSynchronizer] Initializing parameter synchronization group...")
+         actor_rollout_workers = self.actor_wg.workers + self.rollout_wg.workers
+-        collective.create_collective_group(
+-            actor_rollout_workers,
+-            len(actor_rollout_workers),
+-            list(range(0, len(actor_rollout_workers))),
+-            backend=get_nccl_backend(),
+-            group_name=self.sync_group_name,
+-        )
++        n_workers = len(actor_rollout_workers)
++        if self._use_torch_distributed_sync():
++            master_address = ray.get(self.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
++            master_port = ray.get(self.actor_wg.workers[0]._get_free_port.remote())
++            self.actor_wg.create_weight_sync_group(
++                master_address,
++                master_port,
++                0,
++                n_workers,
++            )
++            ray.get(
++                self.rollout_wg.create_weight_sync_group(
++                    master_address,
++                    master_port,
++                    len(self.actor_wg.workers),
++                    n_workers,
++                )
++            )
++        else:
++            collective.create_collective_group(
++                actor_rollout_workers,
++                n_workers,
++                list(range(0, n_workers)),
++                backend=get_nccl_backend(),
++                group_name=self.sync_group_name,
++            )
+ 
+     def _init_actor_rollout_checkpoint_engine(self):
+         ray.get(
