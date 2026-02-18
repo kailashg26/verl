@@ -1,0 +1,34 @@
+diff --git a/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py b/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py
+index 2056e7c76a..d2ae5673b8 100644
+--- a/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py
++++ b/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py
+@@ -246,10 +246,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
+         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+ 
+         # Loop over all available experts in the model and perform the computation on each expert
+-        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+-        for expert_idx in expert_hit:
++        for expert_idx in range(self.num_experts):
+             expert_layer = self.experts[expert_idx]
+-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
++            idx, top_x = torch.where(expert_mask[expert_idx])
+ 
+             # Index the correct hidden states and compute the expert hidden state for
+             # the current expert. We need to make sure to multiply the output hidden
+diff --git a/src/transformers/models/qwen3_moe/modular_qwen3_moe.py b/src/transformers/models/qwen3_moe/modular_qwen3_moe.py
+index e7dd3dda00..c43cb2eae2 100644
+--- a/src/transformers/models/qwen3_moe/modular_qwen3_moe.py
++++ b/src/transformers/models/qwen3_moe/modular_qwen3_moe.py
+@@ -100,10 +100,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
+         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+ 
+         # Loop over all available experts in the model and perform the computation on each expert
+-        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+-        for expert_idx in expert_hit:
++        for expert_idx in range(self.num_experts):
+             expert_layer = self.experts[expert_idx]
+-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
++            idx, top_x = torch.where(expert_mask[expert_idx])
+ 
+             # Index the correct hidden states and compute the expert hidden state for
+             # the current expert. We need to make sure to multiply the output hidden
