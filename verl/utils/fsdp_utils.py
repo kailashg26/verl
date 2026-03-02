@@ -96,6 +96,10 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     fsdp_transformer_layer_cls_to_wrap = _get_attr(
         "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
     )
+    # SMoE uses SMoEDecoderATTLayer and SMoEDecoderMLPLayer; _no_split_modules may list "SMoEDecoderLayer" which does not exist
+    model_config = getattr(module, "config", None)
+    if model_config is not None and getattr(model_config, "model_type", None) == "smoe":
+        fsdp_transformer_layer_cls_to_wrap = ["SMoEDecoderATTLayer", "SMoEDecoderMLPLayer"]
     min_num_params = _get_attr("min_num_params", 0)
     auto_wrap_policy = None
 
@@ -512,6 +516,10 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
         "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
     )
+    # SMoE uses SMoEDecoderATTLayer and SMoEDecoderMLPLayer; _no_split_modules may list "SMoEDecoderLayer" which does not exist
+    model_config = getattr(model, "config", None)
+    if model_config is not None and getattr(model_config, "model_type", None) == "smoe":
+        fsdp_transformer_layer_cls_to_wrap = ["SMoEDecoderATTLayer", "SMoEDecoderMLPLayer"]
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
@@ -551,18 +559,60 @@ def get_shard_placement_fn(fsdp_size):
 
 
 def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinite=False, foreach=None):
-    """torch.nn.utils.clip_grad_norm_ cann't run on cpu parameter DTensor"""
-    from torch.nn.utils.clip_grad import _clip_grads_with_norm_, _get_total_norm
+    """Custom clip_grad_norm_ for FSDP2 that avoids DTensor torch.stack hang.
+
+    The standard torch.nn.utils.clip_grad_norm_ (and its internal _get_total_norm)
+    calls torch.stack on per-parameter DTensor norms, which triggers DTensor's
+    stack_strategy -> redistribute_cost computation that can hang when parameters
+    have incompatible DTensor placements (e.g. MoE models with mixed sharding).
+
+    This implementation converts each DTensor norm to a plain tensor before stacking,
+    avoiding the problematic DTensor dispatch entirely.
+    """
+    from torch.distributed.tensor import DTensor
 
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     else:
         # prevent generators from being exhausted
         parameters = list(parameters)
+
+    max_norm = float(max_norm)
+    norm_type = float(norm_type)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
-    total_norm = total_norm.to(get_device_id(), non_blocking=True)
-    _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+
+    if len(grads) == 0:
+        return torch.tensor(0.0)
+
+    device = get_device_id()
+
+    with torch.no_grad():
+        # Compute per-gradient norms and convert DTensor results to plain tensors
+        # to avoid the DTensor torch.stack dispatch that hangs in redistribute_cost.
+        norms = []
+        for g in grads:
+            norm = torch.linalg.vector_norm(g, norm_type)
+            if isinstance(norm, DTensor):
+                norm = norm.full_tensor()
+            norms.append(norm.to(device))
+
+        # Stack plain tensors to compute total norm (no DTensor dispatch)
+        total_norm = torch.linalg.vector_norm(torch.stack(norms), norm_type)
+
+        if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
+            raise RuntimeError(
+                f"The total norm of order {norm_type} for gradients from "
+                "`parameters` is non-finite, so it cannot be clipped. "
+                "Set `error_if_nonfinite=False` to disable this."
+            )
+
+        # Clip gradients
+        clip_coef = max_norm / (total_norm + 1e-6)
+        clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
+        for g in grads:
+            g.mul_(clip_coef_clamped.to(g.device))
+
+    torch.cuda.empty_cache()
     return total_norm
 
 

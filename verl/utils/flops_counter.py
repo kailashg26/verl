@@ -531,6 +531,61 @@ def _estimate_gpt_oss_flops(config, tokens_sum, batch_seqlens, delta_time):
     return flops_achieved
 
 
+def _estimate_smoe_flops(config, tokens_sum, batch_seqlens, delta_time):
+    """FLOPs for Zyphra-style SMoE: layer-wise MoE (only some layers have experts). Uses
+    hidden_size, kv_channels (head_dim), ffn_hidden_size_list, smoe_layers, moe_router_topk.
+    """
+    hidden_size = config.hidden_size
+    vocab_size = config.vocab_size
+    num_hidden_layers = config.num_hidden_layers
+    num_key_value_heads = config.num_key_value_heads
+    num_attention_heads = config.num_attention_heads
+    head_dim = getattr(config, "kv_channels", None) or getattr(
+        config, "head_dim", hidden_size // num_attention_heads
+    )
+    moe_topk = getattr(config, "moe_router_topk", None) or getattr(config, "num_experts_per_tok", 1)
+
+    # Layer-wise MoE: only layers with non-zero ffn_hidden_size have MoE MLP
+    ffn_list = getattr(config, "ffn_hidden_size_list", None)
+    if ffn_list is not None:
+        num_moe_layers = sum(1 for x in ffn_list if x and x > 0)
+        # Use first non-zero as moe_intermediate_size (or mean if heterogeneous)
+        moe_sizes = [x for x in ffn_list if x and x > 0]
+        moe_intermediate_size = int(moe_sizes[0]) if moe_sizes else (hidden_size * 4)
+    else:
+        num_moe_layers = num_hidden_layers
+        moe_intermediate_size = getattr(config, "moe_intermediate_size", hidden_size * 4)
+
+    # num_experts: from smoe_layers (e.g. [..., 16, ...]) or config
+    num_experts = getattr(config, "num_experts", None)
+    if num_experts is None:
+        smoe_layers = getattr(config, "smoe_layers", [])
+        expert_counts = [x for x in smoe_layers if isinstance(x, (int, float)) and x > 0]
+        num_experts = int(expert_counts[0]) if expert_counts else 8
+
+    q_size = num_attention_heads * head_dim
+    k_size = num_key_value_heads * head_dim
+    v_size = num_key_value_heads * head_dim
+
+    # Attention linear: every layer
+    attn_linear_N = hidden_size * (q_size + k_size + v_size + num_attention_heads * head_dim)
+    # MoE MLP: only num_moe_layers (router + top-k experts, SwiGLU)
+    moe_mlp_N = hidden_size * moe_topk * moe_intermediate_size * 3 + hidden_size * num_experts
+    emd_and_lm_head_N = vocab_size * hidden_size * 2
+
+    dense_N = attn_linear_N * num_hidden_layers + moe_mlp_N * num_moe_layers + emd_and_lm_head_N
+    dense_N_flops = 6 * dense_N * tokens_sum
+
+    seqlen_square_sum = 0
+    for seqlen in batch_seqlens:
+        seqlen_square_sum += seqlen * seqlen
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+
+    flops_all_token = dense_N_flops + attn_qkv_flops
+    flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
+    return flops_achieved
+
+
 def _estimate_unknown_flops(config, tokens_sum, batch_seqlens, delta_time):
     return 0
 
@@ -555,6 +610,7 @@ ESTIMATE_FUNC = {
     "glm4v": _estimate_qwen2_flops,
     "gpt_oss": _estimate_gpt_oss_flops,
     "mimo": _estimate_qwen2_flops,
+    "smoe": _estimate_smoe_flops,
 }
 
 

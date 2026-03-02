@@ -56,9 +56,16 @@ else:
             f"supported. Please use vLLM 0.7.0 or later."
         )
     if not is_sglang_available():
-        raise ValueError(
-            f"vllm version {package_version} not supported and SGLang also not Found. Currently supported "
-            f"vllm versions are 0.7.0+"
-        )
+        # Bypass: allow unsupported vllm versions (e.g. ROCm/custom dev builds) if import succeeds
+        try:
+            from vllm import LLM
+            from vllm.distributed import parallel_state
+            vllm_version = package_version
+            VLLM_SLEEP_LEVEL = 1
+        except Exception:
+            raise ValueError(
+                f"vllm version {package_version} not supported and SGLang also not Found. Currently supported "
+                f"vllm versions are 0.7.0+"
+            )
 
 __all__ = ["LLM", "parallel_state"]

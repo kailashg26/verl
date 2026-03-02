@@ -80,7 +80,12 @@ if _VLLM_VERSION > version.parse("0.11.0"):
 
         get_encoding()
 else:
-    from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+    try:
+        from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+    except ImportError:
+        # CCA_Decode / ROCm vllm and some forks do not re-export from vllm.utils
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+        from vllm.utils.network_utils import get_tcp_uri
 if _VLLM_VERSION >= version.parse("0.12.0"):
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
@@ -120,29 +125,26 @@ class ExternalZeroMQDistributedExecutor(Executor):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
-    if _VLLM_VERSION >= version.parse("0.12.0"):
+    # Required for all vLLM versions (including CCA_Decode/0.1.x): base Executor
+    # does not implement these; without them engine core gets future=None and
+    # raises 'NoneType' has no attribute 'result'.
+    def execute_model(self, scheduler_output: Any, non_block: bool = False) -> Any:
+        output = self.collective_rpc("execute_model", args=(scheduler_output,))
+        result = output[0]
+        if non_block:
+            f = Future()
+            f.set_result(result)
+            return f
+        return result
 
-        def execute_model(
-            self, scheduler_output: "SchedulerOutput", non_block: bool = False
-        ) -> "ModelRunnerOutput | None | Future[ModelRunnerOutput | None]":
-            output = self.collective_rpc("execute_model", args=(scheduler_output,))
-            result = output[0]
-            if non_block:
-                f = Future()
-                f.set_result(result)
-                return f
-            return result
-
-        def sample_tokens(
-            self, grammar_output: "GrammarOutput | None", non_block: bool = False
-        ) -> "ModelRunnerOutput | None | Future[ModelRunnerOutput | None]":
-            output = self.collective_rpc("sample_tokens", args=(grammar_output,))
-            result = output[0]
-            if non_block:
-                f = Future()
-                f.set_result(result)
-                return f
-            return result
+    def sample_tokens(self, grammar_output: Any, non_block: bool = False) -> Any:
+        output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+        result = output[0]
+        if non_block:
+            f = Future()
+            f.set_result(result)
+            return f
+        return result
 
     def collective_rpc(
         self,
@@ -341,14 +343,14 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
-        if self.config.prometheus.enable:
-            if self.config.prometheus.served_model_name:
-                # Extract model name from path if it's a full path
-                served_model_name = self.config.prometheus.served_model_name
-                if "/" in served_model_name:
-                    # If it's a full path, extract the last part as model name
-                    served_model_name = served_model_name.split("/")[-1]
-                args["served_model_name"] = served_model_name
+        # Always set served_model_name: some vLLM forks (e.g. CCA_Decode) require it in config/metrics
+        if self.config.prometheus.enable and self.config.prometheus.served_model_name:
+            served_model_name = self.config.prometheus.served_model_name
+        else:
+            served_model_name = self.model_config.local_path or "model"
+        if "/" in served_model_name:
+            served_model_name = served_model_name.split("/")[-1]
+        args["served_model_name"] = served_model_name
 
         # mtp
         if self.config.mtp.enable and self.config.mtp.enable_rollout:
@@ -446,8 +448,17 @@ class vLLMHttpServer:
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
 
+        # Ensure args.served_model_name exists (some vLLM forks require it in init_app_state)
+        if getattr(args, "served_model_name", None) is None:
+            name = self.model_config.local_path or "model"
+            setattr(args, "served_model_name", name.split("/")[-1] or "model")
+
         app = build_app(args)
-        if _VLLM_VERSION > version.parse("0.11.0"):
+        # init_app_state signature: newer vLLM/CCA_Decode use (engine_client, state, args);
+        # older vLLM used (engine_client, vllm_config, state, args). Detect by second param name.
+        init_sig = inspect.signature(init_app_state)
+        params = list(init_sig.parameters.keys())
+        if len(params) >= 2 and params[1] == "state":
             await init_app_state(engine_client, app.state, args)
         else:
             await init_app_state(engine_client, vllm_config, app.state, args)
